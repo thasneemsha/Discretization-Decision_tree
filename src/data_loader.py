@@ -2,8 +2,7 @@
 data_loader.py  –  CS334 Data Mining Project
 =============================================
 Shared utility: loads and cleans the NIR glucose dataset.
-All four technique scripts import from here so we don't
-repeat the loading code everywhere.
+All technique scripts import from here.
 
 Dataset facts (from README):
   • Calibration : 273 samples
@@ -15,10 +14,10 @@ Dataset facts (from README):
 """
 
 from pathlib import Path
-import numpy as np  #converts data into fast numeric arrays
-import pandas as pd #reads the .txt table
+import numpy as np
+import pandas as pd
 
-# Base project folder
+# Base project folder — works regardless of which script imports this
 BASE_DIR = Path(__file__).resolve().parent
 
 # ── file paths ──────────────────────────────────────────────────────────────
@@ -38,58 +37,68 @@ INFO_COLS = [
     'Run',
 ]
 
-# Glucose level bins used in Techniques 02, 03, 04
+# Glucose level bins (used across all techniques)
 #   Low   : 0 – 10 mM   (hypoglycaemia range)
-#   Normal: 10 – 30 mM  (healthy fasting range, roughly)
-#   High  : 30 – 50 mM  (hyperglycaemia range)
+#   Normal: 10 – 30 mM
+#   High  : 30 – 50 mM
 GLUCOSE_BINS   = [0, 10, 30, 50]
 GLUCOSE_LABELS = ['Low', 'Normal', 'High']
+
+# Clinical cut-points (used by techniques 02, 03, 04)
+#   Hypo    :      < 4 mM
+#   Normal  :  4 – 7 mM
+#   Elevated:  7 – 15 mM
+#   High    :    >= 15 mM
+CLINICAL_BINS   = [4, 7, 15]
+CLINICAL_LABELS = ['Hypo', 'Normal', 'Elevated', 'High']
 
 
 def load_raw(path, max_real_cols=4209):
     """
-     - Reads the raw spectrometer file
-     - Removes extra junk columns added by the instrument
-     - Keeps only the real 4200 wavelength features
+    Read the raw spectrometer file and drop junk columns.
 
     Parameters
     ----------
-    path          : str  – file path [raw file contains extra empty columns]
-    max_real_cols : int  – number of columns to keep (default 4209)
-    -> Only the first 4209 columns are actually useful data
+    path          : Path or str – path to the .txt file
+    max_real_cols : int – keep only the first N columns (default 4209)
 
     Returns
     -------
     df : pd.DataFrame with clean column names
     """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"\n[ERROR] Data file not found: {path}\n"
+            f"        Please place CalibrationData.txt and ValidationData.txt\n"
+            f"        inside:  {path.parent}\n"
+        )
 
     df = pd.read_csv(path, encoding='utf-16', sep='\t', header=0)
-    #utf-16 -> spectrometer exported weird encoding
-    #sep='\t' -> tab-separated file (not CSV)
-    # header=0 -> first row = column names
-
-    # Ignore junk columns, keep only real data
     df = df.iloc[:, :max_real_cols]
-
-    # Strip trailing whitespace, and weird format from column names
     df.columns = [c.strip() for c in df.columns]
-
     return df
+
+
+def _detect_cuvette_col(df):
+    """Handle both 'Cuvette' and 'Kuvette' spellings in the source files."""
+    for name in ('Cuvette', 'Kuvette', 'cuvette', 'kuvette'):
+        if name in df.columns:
+            return name
+    return None
 
 
 def load_dataset():
     """
-    Load, clean, and split the NIR dataset into:
-      X_cal  – calibration spectra  (273 × 4200 float array)
-      y_cal  – calibration glucose  (273,)
-      X_val  – validation spectra   (120 × 4200 float array)
-      y_val  – validation glucose   (120,)
-      wavelengths  – 4200-element array of nm values
-      info_cal / info_val  – DataFrames with all 9 info columns
+    Load, clean, and split the NIR dataset.
 
     Returns
     -------
-    A dict with all of the above.
+    dict with keys:
+      X_cal, y_cal, info_cal   – calibration arrays / DataFrame
+      X_val, y_val, info_val   – validation arrays / DataFrame
+      wavelengths               – (4200,) array of nm values
+      df_cal, df_val            – full raw DataFrames (for column access)
     """
     print("Loading calibration data …")
     df_cal = load_raw(CAL_PATH)
@@ -97,75 +106,109 @@ def load_dataset():
     print("Loading validation data …")
     df_val = load_raw(VAL_PATH)
 
-    # ── Rename info columns to clean names ──────────────────────────────────
-    rename_map = {old: new for old, new in
-                  zip(df_cal.columns[:9], INFO_COLS)}
-    df_cal.rename(columns=rename_map, inplace=True)
-    df_val.rename(columns=rename_map, inplace=True)
+    # ── Rename first 9 columns to canonical INFO_COLS names ─────────────────
+    # (handles Cuvette / Kuvette variant automatically)
+    def _rename(df):
+        raw9 = list(df.columns[:9])
+        rename_map = dict(zip(raw9, INFO_COLS))
+        df = df.rename(columns=rename_map)
+        return df
 
-    # ── Separate info vs spectra ─────────────────────────────────────────────
+    df_cal = _rename(df_cal)
+    df_val = _rename(df_val)
+
+    # ── Separate info vs. spectra ────────────────────────────────────────────
     info_cal = df_cal[INFO_COLS].copy()
     info_val = df_val[INFO_COLS].copy()
 
-    # Wavelength columns: everything after the 9 info cols
     wave_cols   = df_cal.columns[9:].tolist()
-    wavelengths = np.array([float(w) for w in wave_cols])  # nm values
+    wavelengths = np.array([float(w) for w in wave_cols])
 
-    X_cal = df_cal[wave_cols].values.astype(float)   # shape (273, 4200)
-    X_val = df_val[wave_cols].values.astype(float)   # shape (120, 4200)
+    X_cal = df_cal[wave_cols].values.astype(float)   # (273, 4200)
+    X_val = df_val[wave_cols].values.astype(float)   # (120, 4200)
 
     y_cal = info_cal['Glucose (mM)'].values.astype(float)
     y_val = info_val['Glucose (mM)'].values.astype(float)
 
-    # Drop rows with NaN glucose (none expected, but just in case)
+    # Drop rows with NaN glucose (none expected, but defensive)
     cal_ok = ~np.isnan(y_cal)
     val_ok = ~np.isnan(y_val)
-    X_cal, y_cal, info_cal = X_cal[cal_ok], y_cal[cal_ok], info_cal[cal_ok]
-    X_val, y_val, info_val = X_val[val_ok], y_val[val_ok], info_val[val_ok]
+    X_cal, y_cal = X_cal[cal_ok], y_cal[cal_ok]
+    X_val, y_val = X_val[val_ok], y_val[val_ok]
+    info_cal = info_cal[cal_ok].reset_index(drop=True)
+    info_val = info_val[val_ok].reset_index(drop=True)
 
     print(f"  Calibration : {X_cal.shape[0]} samples, "
           f"{X_cal.shape[1]} wavelength points")
     print(f"  Validation  : {X_val.shape[0]} samples, "
           f"{X_val.shape[1]} wavelength points")
-    print(f"  Wavelength  : {wavelengths[0]:.1f} – {wavelengths[-1]:.1f} nm")
+    print(f"  Wavelength  : {wavelengths[0]:.1f} – {wavelengths[-1]:.1f} nm\n")
 
     return dict(
         X_cal=X_cal, y_cal=y_cal, info_cal=info_cal,
         X_val=X_val, y_val=y_val, info_val=info_val,
         wavelengths=wavelengths,
+        df_cal=df_cal, df_val=df_val,
+        wave_cols=wave_cols,
     )
 
 
-def discretize_glucose(y_continuous):
-    """
-    Convert continuous glucose (mM) into class labels.
+# ── Discretization helpers ───────────────────────────────────────────────────
 
-    Bins   : 0–10 → 'Low'  |  10–30 → 'Normal'  |  30–50 → 'High'
-    Returns: numpy array of str labels, same length as y_continuous.
+def discretize_glucose_clinical(glucose_values):
     """
-    labels = np.empty(len(y_continuous), dtype=object)
-    labels[y_continuous <= 10]                          = 'Low'
-    labels[(y_continuous > 10) & (y_continuous <= 30)] = 'Normal'
-    labels[y_continuous > 30]                           = 'High'
+    Clinical cut-points → 4 class labels.
+      < 4  → 'Hypo'
+      4-7  → 'Normal'
+      7-15 → 'Elevated'
+      ≥15  → 'High'
+    """
+    labels = []
+    for g in glucose_values:
+        if g < 4:
+            labels.append('Hypo')
+        elif g < 7:
+            labels.append('Normal')
+        elif g < 15:
+            labels.append('Elevated')
+        else:
+            labels.append('High')
     return labels
+
+
+def discretize_feature_equal_freq(values, n_bins=3):
+    """
+    Equal-frequency binning for a continuous feature.
+
+    Returns
+    -------
+    bin_labels : list of 'B0', 'B1', … strings
+    cut_points : list of cut-point values
+    """
+    import numpy as np
+    arr = np.array(values, dtype=float)
+    percentiles = [100 * i / n_bins for i in range(1, n_bins)]
+    cut_points = [float(np.percentile(arr, p)) for p in percentiles]
+
+    def assign(v):
+        return sum(1 for cp in cut_points if v > cp)
+
+    return [f'B{assign(v)}' for v in arr], cut_points
+
+
+def apply_cutpoints(value, cut_points):
+    """Apply pre-computed cut-points to a single value → bin index."""
+    return sum(1 for cp in cut_points if value > cp)
 
 
 def top_correlated_wavelengths(X, y, wavelengths, n=20):
     """
-    Find the n wavelengths whose absorbance is most correlated
-    with glucose concentration (by Pearson |r|).
-
-    Parameters
-    ----------
-    X           : (n_samples, 4200) spectra
-    y           : (n_samples,) glucose values
-    wavelengths : (4200,) nm array
-    n           : how many top wavelengths to return
+    Return the n wavelengths most correlated with glucose (by Pearson |r|).
 
     Returns
     -------
     top_idx : indices into the 4200-column axis
-    top_nm  : corresponding wavelength values in nm
+    top_nm  : corresponding nm values
     top_r   : correlation coefficients
     """
     correlations = np.array([
